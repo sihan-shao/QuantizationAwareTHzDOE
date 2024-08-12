@@ -27,7 +27,7 @@ class CZT_prop(nn.Module):
         # store the input params
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self._z                  = torch.tensor(z_distance, device=self.device)
+        self._z = torch.tensor(z_distance, device=self.device)
     
     @property
     def z(self) -> torch.Tensor:
@@ -45,19 +45,24 @@ class CZT_prop(nn.Module):
         """
         function for RS transfer function
         """
-        # TODO: modify it into mutiple-wavelength process [Done]
-        wavelengths_expand  =  wavelengths[:,None,None]
+        
+        wavelengths_expand  =  wavelengths[None, :, None, None]
         k = 2 * torch.pi / wavelengths_expand
 
         r = torch.sqrt(meshx**2 + meshy**2 + z**2)
         factor = 1 / (2 * torch.pi) * z / r**2 * (1 / r - 1j*k)
         kernel = torch.exp(1j * k * r) * factor
+        # Do we need to check the minimum propagation distance here? 
+
         return kernel
     
     def build_CZT_grid(self, 
-                       field, 
                        z, 
-                       wavelengths, 
+                       wavelengths,
+                       InputHeight, 
+                       InputWidth,
+                       InputPixel_dx, 
+                       InputPixel_dy,
                        outputHeight,
 				       outputWidth, 						
 				       outputPixel_dx, 
@@ -66,14 +71,51 @@ class CZT_prop(nn.Module):
         [From CZT]: Defines the resolution / sampling of initial and output planes.
         
         Parameters:
-        xin (jnp.array): Array with the x-positions of the input plane.
-        yin (jnp.array): Array with the y-positions of the input plane.
-        xout (jnp.array): Array with the x-positions of the output plane.
-        yout (jnp.array): Array with the y-positions of the output plane.
+            z, 
+            InputHeight
+            InputWidth
+            InputPixel_dx,
+            InputPixel_dy
+            outputHeight
+		    outputWidth					
+		    outputPixel_dx
+		    outputPixel_dy
     
-        Returns the set of parameters: nx, ny, Xout, Yout, dx, dy, delta_out, Dm, fy_1, fy_2, fx_1 and fx_2.
+        Returns the set of parameters: 
+            Inmeshx: 
+            Inmeshy: 
+            Outmeshx: 
+            Outmeshy: 
+            Dm:         dimension of the output ﬁeld
+            fy_1:       Starting point along y-direction in frequency range.
+            fy_2:       End point along y-direction in frequency range.
+            fx_1:       Starting point along x-direction in frequency range.
+            fx_2:       End point along x-direction in frequency range.
         """
-        pass
+        # create grid for input plane
+        x_in = torch.linspace(-InputHeight * InputPixel_dx / 2, InputHeight * InputPixel_dx / 2, InputHeight, device=self.device)
+        y_in = torch.linspace(-InputWidth * InputPixel_dy / 2, InputWidth * InputPixel_dy / 2, InputWidth, device=self.device)
+        Inmeshx, Inmeshy = torch.meshgrid(x_in, y_in, indexing='ij')
+
+        # create grid for output plane
+        x_out = torch.linspace(-outputHeight * outputPixel_dx / 2, outputHeight * outputPixel_dx / 2, outputHeight, device=self.device)
+        y_out = torch.linspace(-outputWidth * outputPixel_dy / 2, outputWidth * outputPixel_dy / 2, outputWidth, device=self.device)
+        Outmeshx, Outmeshy = torch.meshgrid(x_out, y_out, indexing='ij')
+
+        wavelengths_expand = wavelengths[None, :, None, None]  # reshape to [1, C, :, :] for broadcasting
+
+        # For Bluestein method implementation: 
+        # Dimension of the output field - Eq. (11) in [Ref].
+        Dm = wavelengths_expand * z / InputPixel_dx
+
+        # (1) for FFT in X-dimension:
+        fx_1 = x_out[0] + Dm / 2
+        fx_2 = x_out[-1] + Dm / 2
+        # (1) for FFT in Y-dimension:
+        fy_1 = y_out[0] + Dm / 2
+        fy_2 = y_out[-1] + Dm / 2
+
+        return Inmeshx, Inmeshy, Outmeshx, Outmeshy, Dm, fx_1, fx_2, fy_1, fy_2
 
     def compute_np2(self, x):
         """
@@ -85,12 +127,11 @@ class CZT_prop(nn.Module):
         Returns the exponent for the smallest powers of two that satisfy 2**p >= X for each element in X.
         This function is useful for optimizing FFT operations, which are most efficient when sequence length is an exact power of two.
         """
-        np2 = int(2**(torch.ceil(torch.log2(x))))
-        return np2
+        return 2**(np.ceil(np.log2(x))).astype(int)
 
     def compute_fft(self, x, D1, D2, Dm, m, n, mp, M_out, np2):
         """
-        [From Bluestein_method]: JIT-computes the FFT part of the algorithm. 
+        [From Bluestein_method]: the FFT part of the algorithm. 
         Parameters:
             x  (float)  : signal
             D1 (float)  : start intermeidate frequency
@@ -98,7 +139,7 @@ class CZT_prop(nn.Module):
             Dm (float)  : dimension of the imaging plane.
             m     (int) : original x dimension of signal x
             n     (int) : original y dimension of signal x
-            mp    (int) : length of output sequence needed (corresponding to np2)
+            mp    (int) : length of output sequence needed
             M_out (int) : the length of the chirp z-transform of signal x
             np2   (int) : length of the output sequence for efficient FFT computation (exact power of two)
 
@@ -110,24 +151,28 @@ class CZT_prop(nn.Module):
         W = torch.exp(-1j * 2 * torch.pi * (D1 - D2) / (M_out * Dm))
 
         # window function (Premultiply data)
-        h = torch.arange(-m + 1, max(M_out - 1, m - 1) + 1)
-        h2 = h**2 / 2
-        w = W**h2 
-        w_sliced = w[:mp + 1]
+        h = torch.arange(-m + 1, max(M_out, m), device=self.device)
+        h = W**(h**2 / 2) 
+        #print(w.shape)
+        h_sliced = h[:mp + 1]
+        #print(w_sliced.shape)
 
         # Compute the 1D Fourier Transform of 1/h up to length 2**nextpow2(mp)
-        ft_w = torch.fft.fft(1 / w_sliced, np2) # FFT for Chirp filter [Ref Eq.10 last term]
+        ft = torch.fft.fft(1 / h_sliced, np2) # FFT for Chirp filter [Ref Eq.10 last term]
+        #print(ft_w.shape)
         # Compute intermediate result for Bluestein's algorithm [Ref Eq.10 third term]
-        AW = A**(-torch.arange(m)) * w[torch.arange(m - 1, 2 * m - 1)]
-        tmp = torch.tile(AW, (n, 1)).T
+        b = A**(-(torch.arange(0, m, device=self.device))) * h[..., torch.arange(m - 1, 2 * m - 1, device=self.device)]
+        #print(AW.shape)  # torch.Size([1, 28, 1, 200])
+        tmp = torch.tile(b, (1, 1, n, 1)).transpose(-2, -1)
+        #print(tmp.shape)
         # Compute the 1D Fourier transform of input data
-        b = torch.fft.fft(x * tmp, np2, axis=0)
+        b = torch.fft.fft(x * tmp, np2, dim=-2)
         # Compute the inverse Fourier transform
-        b = torch.fft.fft(b * torch.tile(ft2, (n, 1)).T, axis=0)
+        b = torch.fft.ifft(b * torch.tile(ft, (1, 1, n, 1)).transpose(-2, -1), dim=-2)
 
-        return b, w
+        return b, h
 
-    def Bluestein_method(x, f1, f2, Dm, M_out):
+    def Bluestein_method(self, x, f1, f2, Dm, M_out):
         """
         [From CZT]: Performs the DFT using Bluestein method. 
         [Ref1]: Hu, Y., et al. Light Sci Appl 9, 119 (2020).
@@ -146,9 +191,8 @@ class CZT_prop(nn.Module):
         """
 
         # Correspond to the length of the input sequence.  
-        m, n =x.shape
-
-        # intermediate frequency
+        _, _, m, n =x.shape
+        # intermediate frequency  [1, C, 1, 1]
         D1 = f1 + (M_out * Dm + f2 - f1) / (2 * M_out)   # D1 refer to f1 in [Ref1 Eq.S15]
         # Upper frequency limit
         D2 = f2 + (M_out * Dm + f2 - f1) / (2 * M_out)   # D2 refer to f2 in [Ref1 Eq.S15]
@@ -156,14 +200,25 @@ class CZT_prop(nn.Module):
         # Length of the output sequence
         mp = m + M_out - 1
         np2 = self.compute_np2(mp)   # FFT is more efficient when sequence length is an exact power of two.
-        b, w = self.compute_fft(x, D1, D2, Dm, m, n, mp, M_out, np2)
+        b, h = self.compute_fft(x, D1, D2, Dm, m, n, mp, M_out, np2)
+        #print(b.shape, w.shape)
 
         # Extract the relevant portion and multiply by the window function [Ref4 Eq.10 first term]
-        b = b[m:mp + 1, 0:n].T * torch.tile(w[m - 1:mp], (n, 1))
-        
-        
+        b = b[..., m:mp + 1, 0:n].transpose(-2, -1) * torch.tile(h[..., m - 1:mp], (1, 1, n, 1))
+        #print(b.shape)
+        # create a linearly speed array from 0 to M_out-1
+        l = torch.linspace(0, M_out-1, M_out, device=self.device)[None, None, None, :]
+        # scale array to the frequency range [D1, D2]
+        l = l / M_out * (D2 - D1) + D1  
 
-        pass
+        # Eq. S14 in Supplementaty Information Section 3 in [Ref1]. Frequency shift to center the spectrum.
+        M_shift = -m / 2
+        M_shift = torch.exp(-1j * 2 * torch.pi * l * (M_shift + 1 / 2) / Dm)
+        M_shift = torch.tile(M_shift, (1, 1, n, 1))
+        print(M_shift)
+        # Apply the frequency shift to the final output
+        b = b * M_shift
+        return b
 
     def CZT(self, field, z, wavelengths, outputHeight, outputWidth, outputdx, outputdy, outputmeshx, outputmeshy, inputmeshx, inputmeshy, Dm, fx_1, fx_2, fy_1, fy_2):
         """
@@ -174,8 +229,8 @@ class CZT_prop(nn.Module):
         # compute the RS transfer function for input and output plane
         F0 = self.RS_kernel(z, outputmeshx, outputmeshy, wavelengths)  # kernel shape should be [1, wavelength, H, W]
         F  = self.RS_kernel(z, inputmeshx, inputmeshy, wavelengths)
-        
-        # compute the intermedaite results
+    
+        # Compute (E0 x F) in Eq.(6) in [Ref].
         field = field.data * F
 
         # Bluestein method implementation:
@@ -186,7 +241,7 @@ class CZT_prop(nn.Module):
         # (2) FFT in X-dimension using output from (1):
         U = self.Bluestein_method(U, fx_1, fx_2, Dm, outputHeight)
 
-        field = F0 * U * z * outputdx * outputdy * wavelengths
+        field = F0 * U * z * outputdx * outputdy * wavelengths[None, :, None, None]
 
         return field
 
@@ -212,35 +267,47 @@ class CZT_prop(nn.Module):
         Returns ScalarLight object after propagation.
         """
 
-        if outputHeight and outputPixel_dx is None:
-            outputHeight = field.shape[-2]
-            outputPixel_dx = field.spacing[0]
+        InputHeight = field.height
+        InputWidth = field.width
+        InputPixel_dx = field.spacing[0]
+        InputPixel_dy = field.spacing[1]
+        wavelengths = field.wavelengths
+
+        # Set default values for outputHeight and outputPixel_dx if they are None
+        if outputHeight is None:
+            outputHeight = InputHeight
+        if outputPixel_dx is None:
+            outputPixel_dx = InputPixel_dx
+
+        # Set default values for outputWidth and outputPixel_dy if they are None
+        if outputWidth is None:
+            outputWidth = InputWidth
+        if outputPixel_dy is None:
+            outputPixel_dy = InputPixel_dy
+
+        Inmeshx, Inmeshy, Outmeshx, Outmeshy, Dm, fx_1, fx_2, fy_1, fy_2 = self.build_CZT_grid(self._z, wavelengths,
+                                                                                            InputHeight, InputWidth, InputPixel_dx, InputPixel_dy, 
+                                                                                            outputHeight, outputWidth, outputPixel_dx, outputPixel_dy)
+
+        # Compute the diffraction integral using Bluestein method
         
-        if outputWidth and outputPixel_dy is None:
-            outputWidth = field.shape[-1]
-            outputPixel_dy = field.spacing[1]
-
-        # Defines the resolution / sampling of initial and output planes.
-        # parameters of the output plane:
-        x_out = torch.linspace(-int(outputHeight) * outputPixel_dx / 2, int(outputHeight) * outputPixel_dx / 2, int(outputHeight))
-        y_out = torch.linspace(-int(outputWidth) * outputPixel_dy / 2, int(outputWidth) * outputPixel_dy / 2, int(outputWidth))
-        meshx_out, meshy_out = torch.meshgrid(x_out, y_out, indexing='ij').to(self.device)
-        # parameters of the input plane:
-        wavelengths = field.wavelengths  
-        dx_in, dy_in = field.spacing[0], field.spacing[1]
-        # For Bluestein method implementation: 
-        # Dimension of the output field - Eq. (11) in [Ref].
-        Dm = wavelengths * z / dx_in
-
-        # (1) for FFT in X-dimension:
-        fx_1 = x_out[0] + Dm / 2
-        fx_2 = x_out[-1] + Dm / 2
-        # (1) for FFT in Y-dimension:
-        fy_1 = y_out[0] + Dm / 2
-        fy_2 = y_out[-1] + Dm / 2
+        field_out = self.CZT(field, self._z, wavelengths, 
+                            outputHeight, outputWidth, 
+                            outputPixel_dx, outputPixel_dy, 
+                            Outmeshx, Outmeshy, 
+                            Inmeshx, Inmeshy, 
+                            Dm, 
+                            fx_1, fx_2, 
+                            fy_1, fy_2)
 
 
-        pass
+        Eout = ElectricField(
+				data=field_out,
+				wavelengths=wavelengths,
+				spacing=[outputPixel_dx, outputPixel_dy]
+				)
+
+        return Eout
 
 
 class VCZT_prop(CZT_prop):
