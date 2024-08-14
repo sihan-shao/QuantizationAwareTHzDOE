@@ -212,7 +212,7 @@ class FullPrecisionDOELayer(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -317,7 +317,7 @@ class SoftGumbelQuantizedDOELayer(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -506,7 +506,7 @@ class SoftGumbelQuantizedDOELayerv2(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -701,7 +701,7 @@ class SoftGumbelQuantizedDOELayerv3(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -908,7 +908,7 @@ class NaiveGumbelQuantizedDOELayer(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -1053,7 +1053,7 @@ class PSQuantizedDOELayer(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -1213,7 +1213,7 @@ class STEQuantizedDOELayer(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
