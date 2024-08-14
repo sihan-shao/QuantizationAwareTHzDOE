@@ -151,14 +151,14 @@ class CZT_prop(nn.Module):
         W = torch.exp(-1j * 2 * torch.pi * (D1 - D2) / (M_out * Dm))
 
         # window function (Premultiply data)
-        h = torch.arange(-m + 1, max(M_out, m), device=self.device)
+        h = torch.arange(-m + 1, max(M_out - 1, m - 1 ) + 1, device=self.device)
         h = W**(h**2 / 2) 
         #print(w.shape)
         h_sliced = h[:mp + 1]
         #print(w_sliced.shape)
 
         # Compute the 1D Fourier Transform of 1/h up to length 2**nextpow2(mp)
-        ft = torch.fft.fft(1 / h_sliced, np2) # FFT for Chirp filter [Ref Eq.10 last term]
+        ft = torch.fft.fft(1 / h_sliced, n=np2, dim=-1) # FFT for Chirp filter [Ref Eq.10 last term]
         #print(ft_w.shape)
         # Compute intermediate result for Bluestein's algorithm [Ref Eq.10 third term]
         b = A**(-(torch.arange(0, m, device=self.device))) * h[..., torch.arange(m - 1, 2 * m - 1, device=self.device)]
