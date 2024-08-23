@@ -834,7 +834,7 @@ class SoftGumbelQuantizedDOELayerv3(DOELayer):
             #print(scores)
             one_hot = F.gumbel_softmax(scores, tau=tau, hard=True, dim=1)
             q_height_map = (self.lut.reshape(1, len(self.lut), 1, 1) * one_hot).sum(1, keepdim=True)
-            height_map = (1 - iter_frac) * height_map + iter_frac * q_height_map
+            height_map = (1 - beta) * height_map + beta * q_height_map
 
         if iter_frac > 0.8:
 
