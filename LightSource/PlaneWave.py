@@ -28,7 +28,7 @@ class ScalarPlane_Wave(nn.Module):
                 
         self._height = height
         self._width = width
-        self._wavelengths = self.check_wavelengths_beam_waist(wavelengths)
+        self._wavelengths = wavelengths
         self._spacing =self.check_spacing(spacing)
 
     

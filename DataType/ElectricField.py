@@ -103,7 +103,8 @@ class ElectricField():
         elif data.shape[self._BATCH] == 3:
             self.field_type = 'vectorial'
         else:
-            raise ValueError(f'The field must be scalar (B=1) or vectorial (B=3), but the first dimension (batch size) of data is {data.shape[self._BATCH]}.')
+            self.field_type = 'batch'
+            #raise ValueError(f'The field must be scalar (B=1) or vectorial (B=3), but the first dimension (batch size) of data is {data.shape[self._BATCH]}.')
 
         return data.to(self.device)
         

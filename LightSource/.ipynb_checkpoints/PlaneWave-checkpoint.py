@@ -7,7 +7,7 @@ import numpy as np
 from utils.units import *
 from DataType.ElectricField import ElectricField
 
-class Guassian_beam(nn.Module):
+class ScalarPlane_Wave(nn.Module):
     
     """[summary]
 
@@ -28,7 +28,7 @@ class Guassian_beam(nn.Module):
                 
         self._height = height
         self._width = width
-        self._wavelengths = self.check_wavelengths_beam_waist(wavelengths)
+        self._wavelengths = wavelengths
         self._spacing =self.check_spacing(spacing)
 
     
@@ -116,3 +116,28 @@ class Guassian_beam(nn.Module):
         
         
         return out
+
+
+class VectorialPlaneWave(nn.Module):
+    
+    """[summary]
+
+
+    Source is 4D - (B or 1) x C x H X W
+    
+    """    
+    def __init__(self, 
+                 height: int,
+                 width: int, 
+                 wavelengths : torch.Tensor or float = None, 
+                 spacing : torch.Tensor or float =None, 
+                 device = None):
+        
+        super().__init__()
+        
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                
+        self._height = height
+        self._width = width
+        self._wavelengths = self.check_wavelengths_beam_waist(wavelengths)
+        self._spacing =self.check_spacing(spacing)

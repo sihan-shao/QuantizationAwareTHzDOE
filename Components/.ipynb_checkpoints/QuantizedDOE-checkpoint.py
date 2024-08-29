@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import time
+from datetime import datetime
 from abc import ABC
 import pathlib
 import math
@@ -130,14 +132,14 @@ class FixDOEElement(DOELayer):
                  tolerance      : float = 0.1*mm,
                  material       : list = None,
                  device         : torch.device = None) -> None:
-        super(HologramElement, self).__init__()
+        super(FixDOEElement, self).__init__()
         
         if device is None:
             self.device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device     = device
         
-        self.height_map     = torch.tensor(height_map, device=self.device)
+        self.height_map     = nn.parameter.Parameter(torch.tensor(height_map, device=self.device)) # torch.tensor(height_map, device=self.device)
         self.tolerance      = torch.tensor(tolerance, device=self.device)
         self.material       = torch.tensor(material, device=self.device)
         self.epsilon        = self.material[0] # relative permittivity of DOE
@@ -207,15 +209,23 @@ class FullPrecisionDOELayer(DOELayer):
         
     def visualize(self,
                   cmap                    ='viridis',
-                  figsize                 = (4,4)):
+                  figsize                 = (4,4),
+                  crop_size               = None):
         """  visualize the thickness of the doe
         """
-        
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
-        size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
-        size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+
+        size_x = np.array(self.doe_dxy * thickness.shape[0] / 2)
+        size_y = np.array(self.doe_dxy * thickness.shape[1] / 2)
         unit_val, unit_axis = float_to_unit_identifier(max(size_x,size_y))
         size_x = size_x / unit_val
         size_y = size_y / unit_val
@@ -224,6 +234,7 @@ class FullPrecisionDOELayer(DOELayer):
 
         if figsize is not None:
             fig = plt.figure(figsize=figsize)
+
             
         # First subplot: 2D plot
         plt.subplot(1, 1, 1)
@@ -238,6 +249,22 @@ class FullPrecisionDOELayer(DOELayer):
         add_colorbar(_im1)
         plt.tight_layout()
         plt.show()
+    
+    def save(self,crop_size):
+        """ save optimized height map to npy file
+        """
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+        
+        date = datetime.now()
+        height_map = {'thickness':thickness, 'dxy':np.array(self.doe_dxy)}
+        np.save(f"height_map_{date.strftime('%Y%m%d-%H%M%S')}.npy", height_map)
     
     def build_weight_height_map(self):
         height, width = self.doe_size[0], self.doe_size[1]
@@ -317,7 +344,7 @@ class SoftGumbelQuantizedDOELayer(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -412,11 +439,8 @@ class SoftGumbelQuantizedDOELayer(DOELayer):
         # convert look_up_table to phase lut with designed wavelength
         phase_lut = _height_to_phase_with_material_refractive_idx(self.lut, wavelengths.min(), torch.sqrt(self.epsilon))
 
-        #self.init_phase = 2 * torch.pi * torch.sigmoid(torch.clamp(self.weight_init_phase, min=-12.0, max=12.0))
-        # Sample soft categorical using reparameterization trick
-        #scores = self.score_phase(self.init_phase, phase_lut.to(self.init_phase.device), (self.tau_max / tau) **1) *  self.c_s * (self.tau_max / tau) **1
         scores = self.score_phase(self.init_phase, phase_lut.to(self.init_phase.device), (self.tau_max / tau) **1) *  self.c_s * (self.tau_max / tau) **1
-        #print(scores)
+
         one_hot = F.gumbel_softmax(scores, tau=tau, hard=True, dim=1)
         self.height_map = (self.lut.reshape(1, len(self.lut), 1, 1) * one_hot).sum(1, keepdim=True)
 
@@ -424,28 +448,18 @@ class SoftGumbelQuantizedDOELayer(DOELayer):
             self.height_map = self.height_map.squeeze(0,1).to(self.device)
         else:
             unit_height_map = _copy_quad_to_full(self.height_map)
-            #print(unit_height_map.shape)
+
             unit_height, unit_width = unit_height_map.shape[0], unit_height_map.shape[1]
-            #print(unit_height)
+
             self.height_map = unit_height_map.repeat(1, 1, int(height/unit_height), int(width/unit_width)).squeeze(0,1).to(self.device)
-        #print(self.height_map.shape)
+        
         return self.height_map
 
     def forward(self, field: ElectricField, iter_frac=None)->ElectricField:
 
-        #def tau_iter(iter_frac, tau_min=0.5, tau_max=50, r=None):
-        #    if r is None:
-        #        r = math.log(tau_max / tau_min)
-        #    tau = max(tau_min, tau_max * math.exp(-r * iter_frac))
-        #    return tau
         def tau_iter(iter_frac, tau_min=0.5, tau_max=50):
             tau = tau_min + 0.5 * (tau_max - tau_min) * (1 + math.cos(iter_frac * math.pi))
             return tau
-        #def tau_iter(iter_frac, tau_min=0.5, tau_max=50, r=None):
-            # linearly increasing tenperature
-        #    delta_tau = tau_max - tau_min
-        #    tau = tau_min + delta_tau * iter_frac
-        #    return tau
         
         if iter_frac != None:
             tau = tau_iter(iter_frac=iter_frac, 
@@ -453,7 +467,6 @@ class SoftGumbelQuantizedDOELayer(DOELayer):
                            tau_max=self.tau_max)
         elif iter_frac == None:
             tau = None
-        #print(tau)
         
         return self.modulate(input_field=field, 
                              preprocessed_height_map=self.preprocessed_height_map(wavelengths=field.wavelengths, tau=tau),
@@ -506,7 +519,7 @@ class SoftGumbelQuantizedDOELayerv2(DOELayer):
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -559,10 +572,7 @@ class SoftGumbelQuantizedDOELayerv2(DOELayer):
             self.weight_init_phase = nn.parameter.Parameter(
                 torch.randn(height, width, device=self.device), requires_grad=True
             )
-            #self.init_phase = nn.parameter.Parameter(
-            #    -torch.pi + 2 * torch.pi * torch.rand(1, 1, height, width, device=self.device), 
-            #    requires_grad=True
-            #    )
+
         else:
             unit_size = [int(height / self.num_unit), int(width / self.num_unit)]
             self.init_phase = nn.parameter.Parameter(
@@ -608,7 +618,6 @@ class SoftGumbelQuantizedDOELayerv2(DOELayer):
             phase_lut = _height_to_phase_with_material_refractive_idx(self.lut, wavelengths.min(), torch.sqrt(self.epsilon))
             quantized_phase = _height_to_phase_with_material_refractive_idx(height_map, wavelengths.min(), torch.sqrt(self.epsilon))
             # Sample soft categorical using reparameterization trick
-            #scores = self.score_phase(self.init_phase, phase_lut.to(self.init_phase.device), (self.tau_max / tau) **1) *  self.c_s * (self.tau_max / tau) **1
             scores = self.score_phase(quantized_phase, phase_lut.to(quantized_phase.device), (self.tau_max / tau) **1) *  self.c_s * (self.tau_max / tau) **1
             #print(scores)
             one_hot = F.gumbel_softmax(scores, tau=tau, hard=True, dim=1)
@@ -618,28 +627,19 @@ class SoftGumbelQuantizedDOELayerv2(DOELayer):
             self.height_map = height_map.squeeze(0,1).to(self.device)
         else:
             unit_height_map = _copy_quad_to_full(self.height_map)
-            #print(unit_height_map.shape)
+
             unit_height, unit_width = unit_height_map.shape[0], unit_height_map.shape[1]
-            #print(unit_height)
+
             self.height_map = unit_height_map.repeat(1, 1, int(height/unit_height), int(width/unit_width)).squeeze(0,1).to(self.device)
-        #print(self.height_map.shape)
+
         return self.height_map
 
     def forward(self, field: ElectricField, iter_frac=None)->ElectricField:
 
-        #def tau_iter(iter_frac, tau_min=0.5, tau_max=50, r=None):
-        #    if r is None:
-        #        r = math.log(tau_max / tau_min)
-        #    tau = max(tau_min, tau_max * math.exp(-r * iter_frac))
-        #    return tau
+
         def tau_iter(iter_frac, tau_min=0.5, tau_max=50):
             tau = tau_min + 0.5 * (tau_max - tau_min) * (1 + math.cos(iter_frac * math.pi))
             return tau
-        #def tau_iter(iter_frac, tau_min=0.5, tau_max=50, r=None):
-            # linearly increasing tenperature
-        #    delta_tau = tau_max - tau_min
-        #    tau = tau_min + delta_tau * iter_frac
-        #    return tau
         
         if iter_frac != None:
             tau = tau_iter(iter_frac=iter_frac, 
@@ -696,15 +696,24 @@ class SoftGumbelQuantizedDOELayerv3(DOELayer):
 
     def visualize(self,
                   cmap                    ='viridis',
-                  figsize                 = (4,4)):
+                  figsize                 = (4,4), 
+                  crop_size               =None):
         """  visualize the thickness of the doe
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
 
-        size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
-        size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+
+        size_x = np.array(self.doe_dxy * thickness.shape[0] / 2)
+        size_y = np.array(self.doe_dxy * thickness.shape[1] / 2)
         unit_val, unit_axis = float_to_unit_identifier(max(size_x,size_y))
         size_x = size_x / unit_val
         size_y = size_y / unit_val
@@ -727,6 +736,23 @@ class SoftGumbelQuantizedDOELayerv3(DOELayer):
         add_colorbar(_im1)
         plt.tight_layout()
         plt.show()
+
+    def save(self,crop_size):
+        """ save optimized height map to npy file
+        """
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+        
+        date = datetime.now()
+        height_map = {'thickness':thickness, 'dxy':np.array(self.doe_dxy)}
+        np.save(f"height_map_{date.strftime('%Y%m%d-%H%M%S')}.npy", height_map)
 
     def look_up_table(self, look_up_table):
         """
@@ -808,7 +834,7 @@ class SoftGumbelQuantizedDOELayerv3(DOELayer):
             #print(scores)
             one_hot = F.gumbel_softmax(scores, tau=tau, hard=True, dim=1)
             q_height_map = (self.lut.reshape(1, len(self.lut), 1, 1) * one_hot).sum(1, keepdim=True)
-            height_map = (1 - iter_frac) * height_map + iter_frac * q_height_map
+            height_map = (1 - beta) * height_map + beta * q_height_map
 
         if iter_frac > 0.8:
 
@@ -903,12 +929,21 @@ class NaiveGumbelQuantizedDOELayer(DOELayer):
 
     def visualize(self,
                   cmap                    ='viridis',
-                  figsize                 = (4,4)):
+                  figsize                 = (4,4), 
+                  crop_size               =None):
         """  visualize the thickness of the doe
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -934,6 +969,24 @@ class NaiveGumbelQuantizedDOELayer(DOELayer):
         add_colorbar(_im1)
         plt.tight_layout()
         plt.show()
+
+    def save(self,crop_size):
+        """ save optimized height map to npy file
+        """
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+        
+        date = datetime.now()
+        height_map = {'thickness':thickness, 'dxy':np.array(self.doe_dxy)}
+        np.save(f"height_map_{date.strftime('%Y%m%d-%H%M%S')}.npy", height_map)
+
 
     def look_up_table(self, look_up_table):
         """
@@ -1048,12 +1101,22 @@ class PSQuantizedDOELayer(DOELayer):
 
     def visualize(self,
                   cmap                    ='viridis',
-                  figsize                 = (4,4)):
+                  figsize                 = (4,4), 
+                  crop_size               =None):
         """  visualize the thickness of the doe
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -1079,6 +1142,23 @@ class PSQuantizedDOELayer(DOELayer):
         add_colorbar(_im1)
         plt.tight_layout()
         plt.show()
+    
+    def save(self,crop_size):
+        """ save optimized height map to npy file
+        """
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+        
+        date = datetime.now()
+        height_map = {'thickness':thickness, 'dxy':np.array(self.doe_dxy)}
+        np.save(f"height_map_{date.strftime('%Y%m%d-%H%M%S')}.npy", height_map)
 
     def look_up_table(self, look_up_table):
         """
@@ -1208,12 +1288,21 @@ class STEQuantizedDOELayer(DOELayer):
 
     def visualize(self,
                   cmap                    ='viridis',
-                  figsize                 = (4,4)):
+                  figsize                 = (4,4), 
+                  crop_size               =None):
         """  visualize the thickness of the doe
         """
         
 
-        thickness = self._height_map_.squeeze(0,1).detach().cpu().numpy()
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
 
         size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
         size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
@@ -1239,6 +1328,23 @@ class STEQuantizedDOELayer(DOELayer):
         add_colorbar(_im1)
         plt.tight_layout()
         plt.show()
+
+    def save(self,crop_size):
+        """ save optimized height map to npy file
+        """
+        thickness = self.height_map.squeeze(0,1).detach().cpu().numpy()
+
+        if crop_size:
+            H,W = thickness.shape
+
+            crop_height_front = int(round(H - crop_size[0]) / 2.0)
+            crop_width_front = int(round(W - crop_size[1]) / 2.0)
+
+            thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
+        
+        date = datetime.now()
+        height_map = {'thickness':thickness, 'dxy':np.array(self.doe_dxy)}
+        np.save(f"height_map_{date.strftime('%Y%m%d-%H%M%S')}.npy", height_map)
 
     def look_up_table(self, look_up_table):
         """
@@ -1391,12 +1497,13 @@ class RotationallySymmetricSTEQuantizedDOELayer(STEQuantizedDOELayer):
         height, width = self.doe_size[0], self.doe_size[1]
         self.height_map_shape = int(height * torch.sqrt(torch.tensor(2)) / 2)
         self.weight_height_map = nn.parameter.Parameter(
-                -torch.pi + 2 * torch.pi * torch.rand(self.height_map_shape, device=self.device), 
+                -torch.pi + 2 * torch.pi * torch.rand(1, self.height_map_shape, device=self.device), 
                 requires_grad=True
                 )
     
     def preprocessed_height_map(self):
         height_map_1d = self.height_constraint_max * torch.sigmoid(torch.clamp(self.weight_height_map, min=-8.0, max=8.0))
+        height_map_1d = ste_quan(height_map_1d, self.lut).squeeze(0)
 
         radius = self.height_map_shape
         diameter = 2 * radius
@@ -1411,6 +1518,99 @@ class RotationallySymmetricSTEQuantizedDOELayer(STEQuantizedDOELayer):
             height_map_quad += torch.where((radius_distance < float(r + 1)) & (radius_distance >= float(r)),
                                            height_map_1d[r], 0)
 
+
+        height_map_full = _copy_quad_to_full(height_map_quad)
+
+        # Crop the height map from the center with dimensions [height, height]
+        height_map = height_map_full.reshape(diameter, diameter)
+        center_x, center_y = diameter // 2, diameter // 2
+        start_x, start_y = center_x - self.doe_size[0] // 2, center_y - self.doe_size[1] // 2
+        self.height_map = height_map[start_x:start_x + self.doe_size[0], start_y:start_y + self.doe_size[1]]
+
+        return self.height_map
+
+
+class RotationallySymmetricNaiveGumbelQuantizedDOELayer(NaiveGumbelQuantizedDOELayer):
+
+    def build_init_logits(self):
+        height, width = self.doe_size[0], self.doe_size[1]
+        self.height_map_shape = int(height * torch.sqrt(torch.tensor(2)) / 2)
+        self.weight_height_map = nn.parameter.Parameter(
+                torch.rand(1, self.height_map_shape, self.doe_level, device=self.device), requires_grad=True
+                )
+    
+    def preprocessed_height_map(self, tau):
+
+        height, width = self.doe_size[0], self.doe_size[1]
+        # Sample soft categorical using reparameterization trick
+        if tau != None:
+            sample_one_hot = F.gumbel_softmax(self.weight_height_map, tau=tau, hard=True)
+        elif tau == None:
+            sample_one_hot = F.gumbel_softmax(self.weight_height_map, tau=1, hard=True)
+
+        height_map_1d = (self.lut[None, None, :] * sample_one_hot).sum(dim=-1).squeeze(0)
+        #print(height_map_1d.shape)
+        radius = self.height_map_shape
+        diameter = 2 * radius
+        x, y = torch.meshgrid(torch.arange(0, diameter // 2),
+                              torch.arange(0, diameter // 2))
+        radius_distance = torch.sqrt(x ** 2 + y ** 2).to(self.device)
+        height_map_quad = torch.where((radius_distance < 1.0) & (radius_distance >= 0.0),
+                                      height_map_1d[0], 0)
+        
+        for r in range(1, radius - 1):
+            height_map_quad += torch.where((radius_distance < float(r + 1)) & (radius_distance >= float(r)),
+                                           height_map_1d[r], 0)
+
+        height_map_full = _copy_quad_to_full(height_map_quad)
+
+        # Crop the height map from the center with dimensions [height, height]
+        height_map = height_map_full.reshape(diameter, diameter)
+        center_x, center_y = diameter // 2, diameter // 2
+        start_x, start_y = center_x - self.doe_size[0] // 2, center_y - self.doe_size[1] // 2
+        self.height_map = height_map[start_x:start_x + self.doe_size[0], start_y:start_y + self.doe_size[1]]
+
+        return self.height_map
+
+
+class RotationallySymmetricPSQuantizedQuantizedDOELayer(PSQuantizedDOELayer):
+
+    def build_weight_height_map(self):
+        height, width = self.doe_size[0], self.doe_size[1]
+        self.height_map_shape = int(height * torch.sqrt(torch.tensor(2)) / 2)
+        self.weight_height_map = nn.parameter.Parameter(
+                torch.rand(1, self.height_map_shape, device=self.device), requires_grad=True
+                )
+    
+    def preprocessed_height_map(self, tau):
+
+        height, width = self.doe_size[0], self.doe_size[1]
+        self.height_map = self.height_constraint_max * torch.sigmoid(torch.clamp(self.weight_height_map, min=-8.0, max=8.0))
+        # The PSQ function uses sigmoid functions to achieve a gradual transition between quantization levels.
+        self.height_constraint_min = 0
+
+        delta = (self.height_constraint_max - self.height_constraint_min) / (self.doe_level - 1)
+        
+        x_normalized = (self.height_map - self.height_constraint_min) / delta - 0.5
+        levels_range = torch.arange(self.doe_level - 1, device=self.height_map.device).unsqueeze(0).unsqueeze(2)
+
+        height_map_1d = self.height_constraint_min + delta * torch.sum(
+            torch.sigmoid(tau * (x_normalized.unsqueeze(1) - levels_range)),
+            dim=1
+        ).squeeze(0)
+        #print(height_map_1d.shape)
+
+        radius = self.height_map_shape
+        diameter = 2 * radius
+        x, y = torch.meshgrid(torch.arange(0, diameter // 2),
+                              torch.arange(0, diameter // 2))
+        radius_distance = torch.sqrt(x ** 2 + y ** 2).to(self.device)
+        height_map_quad = torch.where((radius_distance < 1.0) & (radius_distance >= 0.0),
+                                      height_map_1d[0], 0)
+        
+        for r in range(1, radius - 1):
+            height_map_quad += torch.where((radius_distance < float(r + 1)) & (radius_distance >= float(r)),
+                                           height_map_1d[r], 0)
 
         height_map_full = _copy_quad_to_full(height_map_quad)
 

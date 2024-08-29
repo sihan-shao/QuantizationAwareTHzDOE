@@ -139,7 +139,7 @@ class FixDOEElement(DOELayer):
         else:
             self.device     = device
         
-        self.height_map     = torch.tensor(height_map, device=self.device)
+        self.height_map     = nn.parameter.Parameter(torch.tensor(height_map, device=self.device)) # torch.tensor(height_map, device=self.device)
         self.tolerance      = torch.tensor(tolerance, device=self.device)
         self.material       = torch.tensor(material, device=self.device)
         self.epsilon        = self.material[0] # relative permittivity of DOE
@@ -712,8 +712,8 @@ class SoftGumbelQuantizedDOELayerv3(DOELayer):
 
             thickness = thickness[crop_height_front: crop_height_front + crop_size[0], crop_width_front: crop_width_front + crop_size[1]]
 
-        size_x = np.array(self.doe_dxy * self.doe_size[0] / 2)
-        size_y = np.array(self.doe_dxy * self.doe_size[1] / 2)
+        size_x = np.array(self.doe_dxy * thickness.shape[0] / 2)
+        size_y = np.array(self.doe_dxy * thickness.shape[1] / 2)
         unit_val, unit_axis = float_to_unit_identifier(max(size_x,size_y))
         size_x = size_x / unit_val
         size_y = size_y / unit_val
